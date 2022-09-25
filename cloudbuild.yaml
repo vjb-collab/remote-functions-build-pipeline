@@ -1,0 +1,76 @@
+---
+steps:
+  # Loop through folders that were changed by last commit
+  - name: 'gcr.io/cloud-builders/git'
+    entrypoint: /bin/bash
+    args:
+      # - ['fetch', '--unshallow']
+      - -c
+      - |
+          mkdir /workspace
+          # Cloud Build doesn't recover the .git file. Thus checkout the repo for this
+          gcloud source repos clone $REPO_NAME /tmp/repo --project=$PROJECT_ID ;
+          cd /tmp/repo
+          git checkout $BRANCH_NAME
+          # Copy only the .git file
+          ### mv /tmp/repo/.git .
+          # Make a diff between this version and the previous one and store the result into a file
+          git diff --name-only --diff-filter=AMDR @~..@ | grep "/" | cut -d"/" -f1 | uniq > /workspace/diff
+
+# Deploy Cloud Functions
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: /bin/bash
+    args:
+      - -c
+      - |
+          apt update && apt install jq -y ;
+
+          # Loop through changed directories
+          for i in $(cat /workspace/diff); do
+            cd ${i};
+
+            # Get config details:
+            source deploy-config.cfg ;
+
+            # Deploy Cloud Function, need to prefix the variable
+            #     with "$$" to avoid a Cloud Build substitution
+            gcloud functions deploy $${_CLOUD_FUNCTION_NAME} \
+                  --gen2 \
+                  --source=. \
+                  --region=$LOCATION \
+                  --trigger-http \
+                  --runtime=python38 \
+                  --entry-point=$${_CLOUD_FUNCTION_ENTRY_POINT} ;
+              
+            # Get Cloud Function trigger URL
+            _CLOUD_TRIGGER_URL=$$(gcloud beta functions describe \
+                  $${_CLOUD_FUNCTION_NAME}  \
+                  --gen2                    \
+                  --region=$LOCATION        \
+                  --format=json |
+                  jq -r '.serviceConfig.uri' ) ;
+
+            # Create BQ remote function
+            bq query \
+                  --use_legacy_sql=false \
+                  --parameter="url::$${_CLOUD_TRIGGER_URL}" \
+                  "$${_BIGQUERY_FUNCTION_DML}" ;
+
+            # Get BQ Connection service account
+            _BQ_SERVICE_ACCOUNT=$$(bq show --location=$${_BIGQUERY_LOCATION} \
+                --format=prettyjson --connection "$${_BIGQUERY_CONNECTION_NAME}" |
+                jq -r '.cloudResource.serviceAccountId' ) ;
+
+            # Grant permissions to BQ svc account on the Cloud Function
+            gcloud beta functions add-iam-policy-binding \
+                  "$${_CLOUD_FUNCTION_NAME}" --region=$LOCATION \
+                  --member=serviceAccount:"$${_BQ_SERVICE_ACCOUNT}" \
+                  --role="roles/cloudfunctions.invoker" --gen2 ;
+
+            gcloud run services add-iam-policy-binding \
+                  "$${_CLOUD_FUNCTION_NAME}" --region=$LOCATION \
+                  --member=serviceAccount:"$${_BQ_SERVICE_ACCOUNT}" \
+                  --role="roles/run.invoker" ;
+
+            cd .. ;
+          done ;

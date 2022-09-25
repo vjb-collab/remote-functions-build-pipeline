@@ -1,0 +1,41 @@
+"""
+# Copyright 2022 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+
+import json
+from rdkit import Chem
+import functions_framework
+
+# Register an HTTP function with the Functions Framework
+@functions_framework.http
+def rdkit_smiles_to_inchi(request):
+  try:
+    return_value = []
+    request_json = request.get_json()
+    calls = request_json["calls"]
+
+    for call in calls:
+      smiles = call[0]
+      try:
+        mol = Chem.MolFromSmiles(smiles)
+        return_value.append(Chem.MolToInchi(mol))
+      except: # pylint: disable=bare-except
+        return_value.append("")
+
+      return_json = json.dumps( { "replies" :  return_value} ), 200
+      return return_json
+  except Exception: # pylint: disable=broad-except
+    return (json.dumps({ "errorMessage": "something unexpected in input" }),
+            400 )
